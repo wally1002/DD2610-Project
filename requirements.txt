@@ -1,0 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.3.0
+torchvision
+numpy==1.24.4
+matplotlib
+torchdiffeq==0.2.5
+diffusers==0.32.2
+omegaconf==2.3.0
