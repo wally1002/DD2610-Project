@@ -27,12 +27,12 @@ class PFODE():
         max_t = self.scheduler.get_t_max()
         min_t = self.scheduler.get_t_min()
         #Because of the reverse direction
-        t_step = torch.tensor([max_t, min_t],dtype=torch.float32).to(x_t.device)
-        #t_step = self.scheduler.get_discrete_time_steps(self.scheduler.num_steps).to(x_t.device)
+        #t_step = torch.tensor([max_t, min_t],dtype=torch.float32).to(x_t.device)
+        t_step = self.scheduler.get_discrete_time_steps(self.scheduler.num_steps).to(x_t.device)
         #Solve to find an estimate of x_0
         x_0_flatten = odeint(self.diff_eq, x_t.flatten(1), t_step, method=self.method)#(2,())
-        x_0 = x_0_flatten.view(2, *self.x_T_shape)
-        #x_0 = x_0_flatten.view(self.scheduler.num_steps, *self.x_T_shape)
+        #x_0 = x_0_flatten.view(2, *self.x_T_shape)
+        x_0 = x_0_flatten.view(self.scheduler.num_steps, *self.x_T_shape)
         return x_0[-1]
 
     def gaussian_prior_x_T(self, batch_size):

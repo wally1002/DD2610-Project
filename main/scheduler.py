@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 import torch
 import numpy as np
 
-
+__DIFFUSION_SCHEDULER__ = {}
 
 def get_diffusion_scheduler(name: str, **kwargs):
     if __DIFFUSION_SCHEDULER__.get(name, None) is None:
