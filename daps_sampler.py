@@ -4,6 +4,8 @@ import torch.nn as nn
 from main.scheduler import get_diffusion_scheduler, EDMScheduler
 from main.pfode import PFODE
 import tqdm
+from forward_operator import LatentWrapper
+
 
 class MCMC_Langevin():
     def __init__(self, eta = 5*10**(-5), beta_y=0.01, iter = 100):
@@ -58,6 +60,31 @@ class DAPS():
                 x_t = x0_cond + torch.randn(x0_cond.shape, device=x0_cond.device, dtype=x0_cond.dtype) * self.annealing_scheduler.sigma_steps[i + 1]
             else:
                 x_t = x0_cond
+
+        return x_t
+
+    
+class LatentDAPS(DAPS):
+    
+    def latent_daps_sample(self, model, z_init, operator, measurement):
+
+        pbar = tqdm.trange(self.annealing_scheduler.num_steps - 1)
+        z_t = z_init
+        for i in pbar:
+            sigma_t = self.annealing_scheduler.sigma_steps[i]
+            with torch.no_grad():
+                diffusion_scheduler = EDMScheduler(num_steps=self.diffusion_scheduler['num_steps'], sigma_max= sigma_t, sigma_min=self.diffusion_scheduler['sigma_min'], timestep=self.diffusion_scheduler['timestep'])
+                pfode = PFODE(diffusion_scheduler, model, input_shape = tuple(z_init.shape) , method='euler')
+                z0_hat = pfode.solve(z_t)
+            
+            z0_cond, z0_cond_list = self.lv_config.mcmc_chain(z0_hat, measurement, LatentWrapper(operator, model), r_t = sigma_t)
+
+            if i != self.annealing_scheduler.num_steps - 1:
+                z_t = z0_cond + torch.randn(z0_cond.shape, device=z0_cond.device, dtype=z0_cond.dtype) * self.annealing_scheduler.sigma_steps[i + 1]
+            else:
+                z_t = z0_cond
+            with torch.no_grad():
+                x_t = model.decode(z_t)
 
         return x_t
 
