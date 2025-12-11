@@ -65,6 +65,14 @@ class Operator(ABC):
 
     def error(self, x, y):
         return ((self(x) - y) ** 2).flatten(1).sum(-1)
+    
+    def gradient(self, x, y, return_loss=False):
+        x_tmp = x.clone().detach().requires_grad_(True)
+        error = self.error(x_tmp, y).sum()
+        x_grad = torch.autograd.grad(error, x_tmp)[0]
+        if return_loss:
+            return x_grad, error
+        return x_grad
 
     def log_likelihood(self, x, y):
         return -self.error(x, y) / 2 / self.sigma ** 2

@@ -2,8 +2,8 @@
 pixel:
   mcmc_sampler_config:  
     num_steps: 100
-    lr: 5e-5 #eta
-    tau: 0.01 #beta_y
+    lr: 5e-5
+    tau: 0.01
     lr_min_ratio: 0.01
     mc_algo: langevin
     prior_solver: gaussian
@@ -44,3 +44,19 @@ ldm:
     name: phase_retrieval
     oversample: 2.0
     sigma: 0.05
+
+# stable diffusion 
+sd: 
+  mcmc_sampler_config: 
+    num_steps: 95
+    lr: 1.10e-4
+    tau: 0.01
+    lr_min_ratio: 0.027
+    momentum: 0.47
+    mc_algo: hmc
+    prior_solver: gaussian
+
+  operator:
+    name: phase_retrieval
+    oversample: 2.0
+    sigma: 0.01
