@@ -22,32 +22,25 @@ This downloads all necessary models, FFHQ and ImageNet datasets. For CelebA-HQ, 
 ```bash
 python eval_daps_pixel_ffhq.py
 ```
-Change the configuration file name in the script as mentioned in the comments.
 
 ### FFHQ Dataset (Latent Space)
 ```bash
 python eval_daps_latent_ffhq.py
 ```
-Change the configuration file name in the script as mentioned in the comments.
 
 ### ImageNet Dataset (Pixel Space)
 ```bash
 python eval_daps_pixel_imagenet.py
 ```
-Change the configuration file name in the script as mentioned in the comments.
-
 ### ImageNet Dataset (Latent Space)
 ```bash
 python eval_daps_latent_imagenet.py
 ```
-Change the configuration file name in the script as mentioned in the comments.
-
 ### CelebA-HQ Dataset (FFHQ Pretrained Model)
 ```bash
 python eval_daps_pixel_celebhq.py
 ```
-
-### CelebA-HQ Dataset (Own Pretrained Model)
+### CelebA-HQ Dataset (celebA-HQ Pretrained Model)
 ```bash
 python eval_daps_pixel_celebhq_ownmodel.py
 ```
@@ -58,7 +51,7 @@ All tasks defined in the configuration files can be run by executing the corresp
 
 ## Scribble Inpainting
 
-To run scribble inpainting tasks, modify the mask in the configuration file using different images from the `Irregular_mask` directory.
+To run scribble inpainting tasks, just change the task configuration file, and if you want a different scribbling mask, you can do so by modifying the mask image name in the configuration file using different images from the `Irregular_mask` directory.
 
 ## Configuration Files
 
@@ -70,9 +63,8 @@ Configuration files are located in the `configs/` directory. To run different ta
 ## Notebooks
 
 Detailed explanations of the DAPS sampler usage and step-by-step examples are provided in Jupyter notebooks:
-- Notebook explaining DAPS sampler implementation
-- Notebook covering all steps to run on FFHQ and ImageNet (pixel and latent space)
-- Notebook for CelebA-HQ with different pretrained models
+- Notebook covering all steps to run on FFHQ and ImageNet (pixel and latent space) ```test_sampler_ffhq_imagenet.ipynb ```
+- Notebook for CelebA-HQ with different pretrained models ```test_sampler_celebahq_OOD.ipynb ```
 
 ## Note
 
