@@ -9,6 +9,8 @@ from functools import partial
 import scipy.linalg  # Required for stable FID calculation
 import matplotlib.pyplot as plt
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,25 +28,25 @@ from model import get_model
 from forward_operator import get_operator
 from main.scheduler import EDMScheduler
 from main.pfode import PFODE
-from daps_sampler import DAPS
+from daps_sampler import LatentDAPS
 
 # ------------------------------------------------------------------------------
 # CONFIGURATION
 # ------------------------------------------------------------------------------
 
 # Paths to the specific files mentioned in your snippet
-MODEL_CONFIG_PATH = 'configs/model/ffhq256ddpm.yaml'
-SAMPLER_CONFIG_PATH = 'configs/sampler/edm_daps.yaml'
+MODEL_CONFIG_PATH = 'configs/model/imagenet256ldm.yaml'
+SAMPLER_CONFIG_PATH = 'configs/daps_config/latent_edm_daps.yaml'
 
 # List of TASK configs to iterate over.
 TASK_CONFIGS_LIST = [
-    # 'configs/task/motion_blur.yaml',
+    #'configs/task/motion_blur.yaml',
     'configs/task/inpainting_rand.yaml',
     'configs/task/nonlinear_blur.yaml',
     'configs/task/phase_retrieval.yaml',
     'configs/task/super_resolution.yaml',
-    'configs/task/gaussian_blur.yaml'
-    'configs/task/inpainting.yaml',
+    'configs/task/gaussian_blur.yaml',
+    'configs/task/inpainting.yaml'
 ]
 
 # Number of stochastic samples per image per task
@@ -167,34 +169,33 @@ def get_logger(name="benchmark"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--save_dir', type=str, default='eval_daps_pixel_ffhq')
+    parser.add_argument('--save_dir', type=str, default='eval_daps_latent_imagenet')
     args = parser.parse_args()
     
     # ==========================================
     # INPUT: YOUR IMAGE PATHS LIST
     # ==========================================
     IMAGE_PATHS = [
-         'dataset/test-ffhq/49799.png',
-         'dataset/test-ffhq/49503.png',
-         'dataset/test-ffhq/49292.png',
-         'dataset/test-ffhq/49573.png',
-         'dataset/test-ffhq/49302.png',
-         'dataset/test-ffhq/49732.png',
-         'dataset/test-ffhq/49088.png',
-         'dataset/test-ffhq/49684.png',
-         'dataset/test-ffhq/49425.png',
-         'dataset/test-ffhq/49582.png',
-         'dataset/test-ffhq/49997.png',
-         'dataset/test-ffhq/49850.png',
-         'dataset/test-ffhq/49120.png',
-         'dataset/test-ffhq/49767.png',
-         'dataset/test-ffhq/49520.png',
-         'dataset/test-ffhq/49405.png',
-         'dataset/test-ffhq/49893.png',
-         'dataset/test-ffhq/49164.png',
-         'dataset/test-ffhq/49673.png',
-         'dataset/test-ffhq/49945.png'
-    ]
+         'dataset/test-imagenet/ILSVRC2012_val_00049617.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049232.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049807.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049839.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049599.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049244.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049027.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049210.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049548.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049773.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049435.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049962.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049286.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049161.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049204.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049114.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049526.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049733.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049653.JPEG',
+         'dataset/test-imagenet/ILSVRC2012_val_00049366.JPEG']
 
     logger = get_logger()
     device_str = f"cuda:{args.gpu}" if torch.cuda.is_available() else 'cpu'
@@ -261,14 +262,14 @@ def main():
         task_cfg = OmegaConf.load(task_config_path)
         
         # Determine operator parameters from task config
-        pixel_cfg = task_cfg.pixel
-        operator_cfg = pixel_cfg.operator
-        mcmc_cfg = pixel_cfg.mcmc_sampler_config
+        ldm_cfg = task_cfg.ldm
+        operator_cfg = ldm_cfg.operator
+        mcmc_cfg = ldm_cfg.mcmc_sampler_config
         
         operator_name = operator_cfg.name
-        
         if task_config_path == 'configs/task/inpainting.yaml':
             operator_name = "inpainting_box"
+            
         # Prepare output dirs
         task_out_path = os.path.join(args.save_dir, operator_name)
         os.makedirs(os.path.join(task_out_path, 'input'), exist_ok=True)
@@ -284,7 +285,7 @@ def main():
         edm_scheduler = EDMScheduler(num_steps)
         
         # Initialize DAPS
-        daps = DAPS(
+        latent_daps = LatentDAPS(
             sampler_cfg['annealing_scheduler_config'],
             sampler_cfg['diffusion_scheduler_config'],
             mcmc_cfg
@@ -332,11 +333,11 @@ def main():
                 
                 # 7. Generate Initial Noise & Sample
                 # Since we are looping batch_size=1, we generate 1 sample.
-                x_init = pf_ode.gaussian_prior_x_T(1).to(device)
+                z_init = pf_ode.gaussian_prior_x_T(1).to(device)
                 
                 # with torch.no_grad():
                     # DAPS Sampling
-                x_final = daps.daps_sample(model, x_init, operator, y)
+                x_final = latent_daps.latent_daps_sample(model, z_init, operator, y)
                 
                 # Save Result
                 save_name = f"{os.path.splitext(fname)[0]}_s{s_i}.png"
@@ -395,7 +396,7 @@ def main():
             logger.warning(f"No samples generated for {operator_name}.")
 
         # Cleanup per task
-        del operator, daps, edm_scheduler, pf_ode
+        del operator, latent_daps, edm_scheduler, pf_ode
         del fid_refs, fid_recons
         gc.collect()
         torch.cuda.empty_cache()

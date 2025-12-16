@@ -6,7 +6,7 @@ import yaml
 import numpy as np
 from PIL import Image
 from functools import partial
-import scipy.linalg  # Required for stable FID calculation
+import scipy.linalg  
 import matplotlib.pyplot as plt
 
 import torch
@@ -15,14 +15,18 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 import torchvision.models as models
 
+# Hugging Face Datasets
+from datasets import load_dataset
+
 # Metrics
 import piq
 
-# OmegaConf for new config style
+# OmegaConf 
 from omegaconf import OmegaConf
 
-
-from model import get_model
+# from model import get_model
+from diffusers import UNet2DModel, DDPMScheduler
+from model import DiffusionModel, register_model
 from forward_operator import get_operator
 from main.scheduler import EDMScheduler
 from main.pfode import PFODE
@@ -32,19 +36,18 @@ from daps_sampler import DAPS
 # CONFIGURATION
 # ------------------------------------------------------------------------------
 
-# Paths to the specific files mentioned in your snippet
-MODEL_CONFIG_PATH = 'configs/model/ffhq256ddpm.yaml'
+# MODEL_CONFIG_PATH = 'configs/model/ffhq256ddpm.yaml'
 SAMPLER_CONFIG_PATH = 'configs/sampler/edm_daps.yaml'
 
-# List of TASK configs to iterate over.
 TASK_CONFIGS_LIST = [
     # 'configs/task/motion_blur.yaml',
     'configs/task/inpainting_rand.yaml',
     'configs/task/nonlinear_blur.yaml',
     'configs/task/phase_retrieval.yaml',
     'configs/task/super_resolution.yaml',
-    'configs/task/gaussian_blur.yaml'
+    'configs/task/gaussian_blur.yaml',
     'configs/task/inpainting.yaml',
+    
 ]
 
 # Number of stochastic samples per image per task
@@ -54,23 +57,127 @@ NUM_SAMPLES = 1
 # HELPER CLASSES & FUNCTIONS
 # ------------------------------------------------------------------------------
 
-class CustomPathDataset(torch.utils.data.Dataset):
-    def __init__(self, image_paths, image_size, transform=None):
-        self.image_paths = image_paths
+@register_model(name='ddpm-celebahq-256')
+class MyDDPMModel(DiffusionModel):
+    def __init__(self, num_steps=10):
+        super().__init__()
+        model_id = "google/ddpm-celebahq-256"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        self.unet = UNet2DModel.from_pretrained(model_id)
+        self.unet.to(self.device)
+        self.unet.eval()
+
+        self.ddpm_scheduler = DDPMScheduler.from_pretrained(model_id)
+        self.alphas_cumprod = self.ddpm_scheduler.alphas_cumprod.to(self.device)
+        
+        self.edm_scheduler = EDMScheduler(num_steps=num_steps)
+
+    def _get_timestep_from_sigma(self, sigma):
+        # Ensure sigma is a tensor
+        if not torch.is_tensor(sigma):
+            sigma = torch.tensor(sigma, device=self.device)
+        
+        # Calculate target alpha_bar based on sigma: alpha_bar = 1 / (sigma^2 + 1)
+        target_alpha = 1 / (sigma ** 2 + 1)
+        
+        # Find closest timestep
+        diff = torch.abs(self.alphas_cumprod - target_alpha)
+        t = torch.argmin(diff)
+        return t
+
+    def _scale_input(self, x, sigma):
+        scale = torch.sqrt(sigma ** 2 + 1)
+        return x / scale
+
+    def score(self, x, sigma):
+        """
+        Computes the Score Function: \nabla_x log p(x)
+        Required by PFODE.
+        """
+        x = x.to(self.device)
+        t = self._get_timestep_from_sigma(sigma)
+        
+        x_in = self._scale_input(x, sigma)
+        
+        with torch.no_grad():
+            epsilon = self.unet(x_in, t).sample
+            
+        score_val = -epsilon / sigma
+        return score_val
+
+    def predict_x0(self, x, sigma):
+        """
+        Computes the Expected Clean Data (Tweedie Estimate).
+        Useful for visualization, but NOT for the ODE derivative (in this specific implementation).
+        """
+        x = x.to(self.device)
+        t = self._get_timestep_from_sigma(sigma)
+        
+        x_in = self._scale_input(x, sigma)
+        
+        with torch.no_grad():
+            epsilon = self.unet(x_in, t).sample
+            
+        # x0 = x - sigma * epsilon
+        x0_estimate = x - sigma * epsilon
+        return x0_estimate
+
+    def get_in_shape(self):
+        return (3, 256, 256)
+    
+class HFSubsetDataset(torch.utils.data.Dataset):
+    def __init__(self, split="val", num_images=20, image_size=256, transform=None, seed=42):
+        """
+        Loads a specific subset of images from Hugging Face deterministically.
+        
+        Args:
+            seed (int): The magic number. As long as this stays 42 (or any fixed int), 
+                        you will get the exact same images every time.
+        """
         self.image_size = image_size
         self.transform = transform
+        
+        print(f"Loading {num_images} images from Hugging Face (korexyz/celeba-hq-256x256)...")
+        try:
+            # 1. Load the dataset
+            ds = load_dataset("korexyz/celeba-hq-256x256", split=split)
+            
+            # 2. Shuffle deterministically using the seed
+            # This ensures we don't just get the first 20 (which might be similar),
+            # but we get the SAME random 20 every time.
+            ds_shuffled = ds.shuffle(seed=seed)
+            
+            # 3. Select the first N from the shuffled list
+            max_len = min(len(ds_shuffled), num_images)
+            self.dataset = ds_shuffled.select(range(max_len))
+            
+            print(f"Successfully loaded {len(self.dataset)} images (Deterministically shuffled with seed {seed}).")
+            
+        except Exception as e:
+            print(f"Error loading dataset: {e}")
+            raise
 
     def __len__(self):
-        return len(self.image_paths)
+        return len(self.dataset)
 
     def __getitem__(self, idx):
-        path = self.image_paths[idx]
-        img = Image.open(path).convert("RGB")
-        # Resize to match model expectation (usually 256 for FFHQ)
+        item = self.dataset[idx]
+        img = item['image']
+
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
         img = img.resize((self.image_size, self.image_size), resample=Image.BICUBIC)
+
         if self.transform:
             img = self.transform(img)
-        return img, os.path.basename(path)
+            
+        # We can use the real ID from the dataset if available, otherwise generated index
+        # 'fname' ensures the output filename is consistent.
+        fname = f"img_{idx:05d}.png"
+        
+        return img, fname
 
 class InceptionFeatureExtractor(nn.Module):
     """ Extracts features from InceptionV3 for FID calculation. """
@@ -95,16 +202,13 @@ class InceptionFeatureExtractor(nn.Module):
         self.eval()
 
     def forward(self, x):
-        # Resize to 299x299 for Inception
         x = F.interpolate(x, size=(299, 299), mode='bilinear', align_corners=False)
-        # Normalize to [-1, 1] range which Inception typically expects if input is [0,1]
         x = (x - 0.5) / 0.5
         for block in self.blocks:
             x = block(x)
         return x.view(x.size(0), -1)
 
 def compute_fid_stats(feature_extractor, images_tensor, device, batch_size=20):
-    """ Computes mu and sigma for FID. Returns numpy arrays. """
     all_features = []
     n_samples = images_tensor.shape[0]
     
@@ -120,7 +224,6 @@ def compute_fid_stats(feature_extractor, images_tensor, device, batch_size=20):
     return mu, sigma
 
 def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
-    """Numpy implementation of the Frechet Distance."""
     mu1 = np.atleast_1d(mu1)
     mu2 = np.atleast_1d(mu2)
     sigma1 = np.atleast_2d(sigma1)
@@ -141,7 +244,6 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     return (diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
 
 def tensor_to_np_img(tensor):
-    """Converts [-1, 1] tensor to [0, 255] numpy image for saving."""
     img = tensor.clone().detach().cpu()
     img = (img + 1.0) / 2.0
     img = torch.clamp(img, 0.0, 1.0)
@@ -167,47 +269,22 @@ def get_logger(name="benchmark"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--save_dir', type=str, default='eval_daps_pixel_ffhq')
+    parser.add_argument('--save_dir', type=str, default='eval_daps_pixel_celebhq_ownmodel')
     args = parser.parse_args()
     
-    # ==========================================
-    # INPUT: YOUR IMAGE PATHS LIST
-    # ==========================================
-    IMAGE_PATHS = [
-         'dataset/test-ffhq/49799.png',
-         'dataset/test-ffhq/49503.png',
-         'dataset/test-ffhq/49292.png',
-         'dataset/test-ffhq/49573.png',
-         'dataset/test-ffhq/49302.png',
-         'dataset/test-ffhq/49732.png',
-         'dataset/test-ffhq/49088.png',
-         'dataset/test-ffhq/49684.png',
-         'dataset/test-ffhq/49425.png',
-         'dataset/test-ffhq/49582.png',
-         'dataset/test-ffhq/49997.png',
-         'dataset/test-ffhq/49850.png',
-         'dataset/test-ffhq/49120.png',
-         'dataset/test-ffhq/49767.png',
-         'dataset/test-ffhq/49520.png',
-         'dataset/test-ffhq/49405.png',
-         'dataset/test-ffhq/49893.png',
-         'dataset/test-ffhq/49164.png',
-         'dataset/test-ffhq/49673.png',
-         'dataset/test-ffhq/49945.png'
-    ]
-
     logger = get_logger()
     device_str = f"cuda:{args.gpu}" if torch.cuda.is_available() else 'cpu'
     device = torch.device(device_str)
     logger.info(f"Device set to {device_str}.")
 
     # -----------------------
-    # 1. LOAD MODEL (Once)
+    # 1. LOAD MODEL
     # -----------------------
-    logger.info(f"Loading Model from {MODEL_CONFIG_PATH}")
-    model_cfg = OmegaConf.load(MODEL_CONFIG_PATH)
-    model = get_model(**model_cfg).to(device)
-    model.eval()
+    # logger.info(f"Loading Model from {MODEL_CONFIG_PATH}")
+    # model_cfg = OmegaConf.load(MODEL_CONFIG_PATH)
+    # model = get_model(**model_cfg).to(device)
+    # model.eval()
+    model = MyDDPMModel()
 
     # -----------------------
     # 2. LOAD SAMPLER CONFIG
@@ -222,7 +299,6 @@ def main():
     detailed_csv_path = os.path.join(args.save_dir, 'metrics_detailed_daps.csv')
     summary_csv_path = os.path.join(args.save_dir, 'metrics_summary_daps.csv')
 
-    # Initialize CSV headers
     if not os.path.exists(detailed_csv_path):
         with open(detailed_csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
@@ -237,15 +313,26 @@ def main():
     lpips_metric = piq.LPIPS(replace_pooling=True, reduction='none').to(device)
     inception_fe = InceptionFeatureExtractor().to(device)
 
-    # Dataset transformation ([-1, 1])
-    # Note: Adjust image_size based on your model config if not 256
-    image_size = model_cfg.get('image_size', 256) 
+    # Dataset transformation
+    # image_size = model_cfg.get('image_size', 256) 
+    image_size = 256
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
-    dataset = CustomPathDataset(IMAGE_PATHS, image_size=image_size, transform=transform)
-    # Use batch_size=1 for controlled evaluation loop
+
+    # -----------------------
+    # 4. DATASET (MODIFIED)
+    # -----------------------
+    # We load 20 images from HuggingFace instead of local paths
+    dataset = HFSubsetDataset(
+        split="validation", 
+        num_images=20, 
+        image_size=image_size, 
+        transform=transform,
+        seed=42 
+    )
+    
     loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
 
     # --------------------------------------------------------------------------
@@ -259,8 +346,6 @@ def main():
             continue
             
         task_cfg = OmegaConf.load(task_config_path)
-        
-        # Determine operator parameters from task config
         pixel_cfg = task_cfg.pixel
         operator_cfg = pixel_cfg.operator
         mcmc_cfg = pixel_cfg.mcmc_sampler_config
@@ -269,21 +354,17 @@ def main():
         
         if task_config_path == 'configs/task/inpainting.yaml':
             operator_name = "inpainting_box"
-        # Prepare output dirs
+        
         task_out_path = os.path.join(args.save_dir, operator_name)
         os.makedirs(os.path.join(task_out_path, 'input'), exist_ok=True)
         os.makedirs(os.path.join(task_out_path, 'recon'), exist_ok=True)
         os.makedirs(os.path.join(task_out_path, 'label'), exist_ok=True)
 
-        # 4. Initialize Operator
         operator = get_operator(**operator_cfg)
         # operator = operator.to(device)
 
-        # 5. Initialize DAPS Sampler Components
         num_steps = 5 
         edm_scheduler = EDMScheduler(num_steps)
-        
-        # Initialize DAPS
         daps = DAPS(
             sampler_cfg['annealing_scheduler_config'],
             sampler_cfg['diffusion_scheduler_config'],
@@ -294,75 +375,58 @@ def main():
         task_ssim = []
         task_lpips = []
         
-        fid_refs = []   # Real images
-        fid_recons = [] # Generated images
+        fid_refs = []
+        fid_recons = []
 
         # ----------------------------------------------------------------------
         # INNER LOOP: IMAGES
         # ----------------------------------------------------------------------
         for idx, (ref_img, fname_tup) in enumerate(loader):
             fname = fname_tup[0]
-            ref_img = ref_img.to(device) # Shape [1, 3, H, W]
+            ref_img = ref_img.to(device) # [1, 3, H, W]
             
             # Save Label
             plt.imsave(os.path.join(task_out_path, 'label', fname), tensor_to_np_img(ref_img[0]))
 
-            # 6. Measurement (Forward Operator)
+            # Measurement
             with torch.no_grad():
                 y = operator.measure(ref_img)
              
-            # so we only try to save if it has 3 channels and spatial dims, 
-            # otherwise skip or save visualization logic specific to task.
             if y.shape == ref_img.shape:
                 plt.imsave(os.path.join(task_out_path, 'input', fname), tensor_to_np_img(y[0]))
             
-            # Prepare PFODE with current image shape
-            # shape tuple needs to be (N, C, H, W)
             current_shape = ref_img.shape 
             pf_ode = PFODE(edm_scheduler, model, current_shape)
 
-            # Store reference for FID ([0,1] range)
             ref_01 = torch.clamp((ref_img + 1.0) / 2.0, 0.0, 1.0)
             
-            # ------------------------------------------------------------------
-            # SAMPLING LOOP
-            # ------------------------------------------------------------------
-            # We iterate NUM_SAMPLES times to generate multiple realizations if desired
+            # STOCHASTIC SAMPLING LOOP
             for s_i in range(NUM_SAMPLES):
-                
-                # 7. Generate Initial Noise & Sample
-                # Since we are looping batch_size=1, we generate 1 sample.
                 x_init = pf_ode.gaussian_prior_x_T(1).to(device)
                 
-                # with torch.no_grad():
-                    # DAPS Sampling
+                # DAPS Sample
                 x_final = daps.daps_sample(model, x_init, operator, y)
                 
                 # Save Result
                 save_name = f"{os.path.splitext(fname)[0]}_s{s_i}.png"
                 plt.imsave(os.path.join(task_out_path, 'recon', save_name), tensor_to_np_img(x_final[0]))
 
-                # 8. Metrics
+                # Metrics
                 sample_01 = torch.clamp((x_final + 1.0) / 2.0, 0.0, 1.0)
 
-                # PSNR
                 p_val = piq.psnr(sample_01, ref_01, data_range=1.0).item()
                 task_psnr.append(p_val)
 
-                # SSIM
                 s_val = piq.ssim(sample_01, ref_01, data_range=1.0).item()
                 task_ssim.append(s_val)
 
-                # LPIPS
                 with torch.no_grad():
                     l_val = lpips_metric(sample_01, ref_01).item()
                 task_lpips.append(l_val)
 
-                # Accumulate for FID
                 fid_refs.append(ref_01.detach().cpu())
                 fid_recons.append(sample_01.detach().cpu())
 
-                # Log to CSV
                 with open(detailed_csv_path, 'a', newline='') as f:
                     csv.writer(f).writerow([operator_name, fname, s_i, p_val, s_val, l_val])
 
@@ -378,7 +442,6 @@ def main():
             tensor_refs = torch.cat(fid_refs, dim=0)
             tensor_recons = torch.cat(fid_recons, dim=0)
 
-            # Compute stats
             mu_real, sigma_real = compute_fid_stats(inception_fe, tensor_refs, device)
             mu_fake, sigma_fake = compute_fid_stats(inception_fe, tensor_recons, device)
             fid_score = calculate_frechet_distance(mu_real, sigma_real, mu_fake, sigma_fake)
@@ -394,7 +457,6 @@ def main():
         else:
             logger.warning(f"No samples generated for {operator_name}.")
 
-        # Cleanup per task
         del operator, daps, edm_scheduler, pf_ode
         del fid_refs, fid_recons
         gc.collect()

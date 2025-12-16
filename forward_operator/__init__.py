@@ -30,7 +30,9 @@ import scipy
 import numpy as np
 import yaml
 import warnings
-
+from torch.autograd import grad
+from PIL import Image
+from torchvision import transforms
 __OPERATOR__ = {}
 
 
@@ -179,6 +181,47 @@ class Inpainting(Operator):
         if self.mask is None:
             self.mask = self.mask_gen(x)
             self.mask = self.mask[0:1, 0:1, :, :]
+        return x * self.mask
+
+@register_operator(name='scribble_inpainting')
+class ScribbleInpainting(Operator):
+    def __init__(self, mask_path, resolution=256, device='cuda', sigma=0.05):
+        """
+        Args:
+            mask_path (str): Path to the .jpg mask file.
+            resolution (int): Size to resize the mask to (e.g., 256).
+            device (str): 'cuda' or 'cpu'.
+            sigma (float): Noise level.
+        """
+        super().__init__(sigma)
+        self.device = device
+        self.mask_path = mask_path
+        self.resolution = resolution
+        self.mask = self._load_mask()
+
+    def _load_mask(self):
+        # Load image
+        # We convert to 'L' (Grayscale) because masks are usually black/white
+        pil_img = Image.open(self.mask_path).convert('L') 
+        
+        # Transform to Tensor
+        # Resize to match resolution and convert to tensor [0, 1]
+        transform = transforms.Compose([
+            transforms.Resize((self.resolution, self.resolution)),
+            transforms.ToTensor(),
+        ])
+        mask_tensor = transform(pil_img).to(self.device)
+        
+        # Assuming Black (0) is the hole and White (1) is the keep area.
+        mask_tensor = (mask_tensor > 0.5).float()
+        
+        # Expand dimensions to shape [1, 1, H, W] so it broadcasts correctly
+        if len(mask_tensor.shape) == 3:
+            mask_tensor = mask_tensor.unsqueeze(0) # Make it [1, 1, H, W]
+            
+        return mask_tensor
+
+    def __call__(self, x):
         return x * self.mask
 
 

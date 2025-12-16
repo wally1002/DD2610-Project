@@ -9,6 +9,8 @@ from functools import partial
 import scipy.linalg  # Required for stable FID calculation
 import matplotlib.pyplot as plt
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,15 +28,15 @@ from model import get_model
 from forward_operator import get_operator
 from main.scheduler import EDMScheduler
 from main.pfode import PFODE
-from daps_sampler import DAPS
+from daps_sampler import LatentDAPS
 
 # ------------------------------------------------------------------------------
 # CONFIGURATION
 # ------------------------------------------------------------------------------
 
 # Paths to the specific files mentioned in your snippet
-MODEL_CONFIG_PATH = 'configs/model/ffhq256ddpm.yaml'
-SAMPLER_CONFIG_PATH = 'configs/sampler/edm_daps.yaml'
+MODEL_CONFIG_PATH = 'configs/model/ffhq256ldm.yaml'
+SAMPLER_CONFIG_PATH = 'configs/sampler/latent_edm_daps.yaml'
 
 # List of TASK configs to iterate over.
 TASK_CONFIGS_LIST = [
@@ -43,8 +45,8 @@ TASK_CONFIGS_LIST = [
     'configs/task/nonlinear_blur.yaml',
     'configs/task/phase_retrieval.yaml',
     'configs/task/super_resolution.yaml',
-    'configs/task/gaussian_blur.yaml'
-    'configs/task/inpainting.yaml',
+    'configs/task/gaussian_blur.yaml',
+    'configs/task/inpainting.yaml'
 ]
 
 # Number of stochastic samples per image per task
@@ -167,7 +169,7 @@ def get_logger(name="benchmark"):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu', type=int, default=0)
-    parser.add_argument('--save_dir', type=str, default='eval_daps_pixel_ffhq')
+    parser.add_argument('--save_dir', type=str, default='eval_daps_latent_ffhq')
     args = parser.parse_args()
     
     # ==========================================
@@ -261,12 +263,11 @@ def main():
         task_cfg = OmegaConf.load(task_config_path)
         
         # Determine operator parameters from task config
-        pixel_cfg = task_cfg.pixel
-        operator_cfg = pixel_cfg.operator
-        mcmc_cfg = pixel_cfg.mcmc_sampler_config
+        ldm_cfg = task_cfg.ldm
+        operator_cfg = ldm_cfg.operator
+        mcmc_cfg = ldm_cfg.mcmc_sampler_config
         
         operator_name = operator_cfg.name
-        
         if task_config_path == 'configs/task/inpainting.yaml':
             operator_name = "inpainting_box"
         # Prepare output dirs
@@ -284,7 +285,7 @@ def main():
         edm_scheduler = EDMScheduler(num_steps)
         
         # Initialize DAPS
-        daps = DAPS(
+        latent_daps = LatentDAPS(
             sampler_cfg['annealing_scheduler_config'],
             sampler_cfg['diffusion_scheduler_config'],
             mcmc_cfg
@@ -332,11 +333,11 @@ def main():
                 
                 # 7. Generate Initial Noise & Sample
                 # Since we are looping batch_size=1, we generate 1 sample.
-                x_init = pf_ode.gaussian_prior_x_T(1).to(device)
+                z_init = pf_ode.gaussian_prior_x_T(1).to(device)
                 
                 # with torch.no_grad():
                     # DAPS Sampling
-                x_final = daps.daps_sample(model, x_init, operator, y)
+                x_final = latent_daps.latent_daps_sample(model, z_init, operator, y)
                 
                 # Save Result
                 save_name = f"{os.path.splitext(fname)[0]}_s{s_i}.png"
@@ -395,7 +396,7 @@ def main():
             logger.warning(f"No samples generated for {operator_name}.")
 
         # Cleanup per task
-        del operator, daps, edm_scheduler, pf_ode
+        del operator, latent_daps, edm_scheduler, pf_ode
         del fid_refs, fid_recons
         gc.collect()
         torch.cuda.empty_cache()

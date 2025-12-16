@@ -18,10 +18,10 @@ echo "Downloading ImageNet 256 LDM model..."
 wget https://ommer-lab.com/files/latent-diffusion/nitro/cin/model.ckpt -P ./checkpoints/
 mv checkpoints/model.ckpt checkpoints/ldm_imagenet256.pt
 
-# Nonlinear blur model# Not downloaded yet
-#echo "Downloading FFHQ nonlinear blur model..."
-#gdown https://drive.google.com/uc?id=1vRoDpIsrTRYZKsOMPNbPcMtFDpCT6Foy -O forward_operator/bkse/experiments/pretrained/GOPRO_wVAE.pth
-
+# Nonlinear blur model
+echo "Downloading FFHQ nonlinear blur model..."
+mkdir -p forward_operator/bkse/experiments/pretrained
+gdown https://drive.google.com/uc?id=1vRoDpIsrTRYZKsOMPNbPcMtFDpCT6Foy -O forward_operator/bkse/experiments/pretrained/GOPRO_wVAE.pth
 
 # Testing Dataset
 echo "Downloading FFHQ test dataset..."
